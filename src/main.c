@@ -18,7 +18,8 @@ typedef struct {
     int n_deps;
     int in_degree;
 
-    int pipe_fd[2]; // [0]=lectura (padre), [1]=escritura (hijo)
+    int pipe_fd[2];
+    char mensaje[MAX_MSG]; // el mensaje que ESTA actividad produjo al terminar
 } Actividad;
 
 Actividad actividades[MAX_ACT];
@@ -95,17 +96,34 @@ void leer_plan(const char *path) {
     fclose(f);
 }
 
-void ejecutar_actividad(Actividad *a) {
+// Busca el indice de una actividad dado su id (para mirar los mensajes de las deps)
+int buscar_por_id(const char *id) {
+    for (int i = 0; i < n_actividades; i++) {
+        if (strcmp(actividades[i].id, id) == 0) return i;
+    }
+    return -1;
+}
+
+void ejecutar_actividad(int idx) {
+    Actividad *a = &actividades[idx];
+
+    // Mostramos los insumos que llegaron de las dependencias (heredados por fork)
+    for (int d = 0; d < a->n_deps; d++) {
+        int idx_dep = buscar_por_id(a->deps[d]);
+        if (idx_dep != -1 && actividades[idx_dep].mensaje[0] != '\0') {
+            printf("  [hijo pid=%d] recibi insumo: \"%s\"\n", getpid(), actividades[idx_dep].mensaje);
+        }
+    }
+
     printf("  [hijo pid=%d] empezando '%s' (%ld ms)\n", getpid(), a->nombre, a->tiempo_ms);
     usleep(a->tiempo_ms * 1000);
     printf("  [hijo pid=%d] termine '%s'\n", getpid(), a->nombre);
 
-    // Escribimos un mensaje acotado al pipe antes de morir
     char msg[MAX_MSG];
     snprintf(msg, sizeof(msg), "insumo de '%s' listo", a->nombre);
 
-    close(a->pipe_fd[0]);            // el hijo no lee, solo escribe: cierra lectura
-    write(a->pipe_fd[1], msg, strlen(msg) + 1); // +1 para incluir el '\0'
+    close(a->pipe_fd[0]);
+    write(a->pipe_fd[1], msg, strlen(msg) + 1);
     close(a->pipe_fd[1]);
 }
 
@@ -139,10 +157,13 @@ int main(int argc, char *argv[]) {
                     perror("fork");
                     exit(1);
                 } else if (pid == 0) {
-                    ejecutar_actividad(&actividades[i]);
+                    // En este punto el hijo YA TIENE una copia de actividades[],
+                    // incluyendo los .mensaje que sus dependencias dejaron escritos
+                    // antes de que este fork ocurriera.
+                    ejecutar_actividad(i);
                     exit(0);
                 } else {
-                    close(actividades[i].pipe_fd[1]); // el padre no escribe, solo lee
+                    close(actividades[i].pipe_fd[1]);
                     hijo_pid[i] = pid;
                     lanzada[i] = 1;
                     activos++;
@@ -174,13 +195,11 @@ int main(int argc, char *argv[]) {
                        actividades[idx].nombre, WEXITSTATUS(status));
             }
 
-            // Leemos el mensaje que dejo el hijo en su pipe
-            char msg[MAX_MSG];
-            ssize_t n = read(actividades[idx].pipe_fd[0], msg, sizeof(msg));
-            if (n > 0) {
-                printf("[padre] mensaje recibido de '%s': \"%s\"\n",
-                       actividades[idx].nombre, msg);
-            }
+            // Guardamos el mensaje en actividades[idx].mensaje: como esta
+            // estructura vive en el padre, cualquier fork() FUTURO (de un
+            // dependiente que se lance despues) va a heredar este valor ya escrito.
+            ssize_t n = read(actividades[idx].pipe_fd[0], actividades[idx].mensaje, MAX_MSG);
+            (void)n;
             close(actividades[idx].pipe_fd[0]);
 
             for (int j = 0; j < n_actividades; j++) {
