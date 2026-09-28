@@ -98,7 +98,12 @@ void Grafo::construirDAG() {
     // (con 10000 actividades eso se pone lento altiro)
     std::unordered_map<std::string, int> tabla;
     tabla.reserve(acts.size() * 2);
-    for (size_t i = 0; i < acts.size(); i++) tabla[acts[i].id] = (int)i;
+    
+    for (size_t i = 0; i < acts.size(); i++) {
+        if (!tabla.emplace(acts[i].id, (int)i).second) {
+            throw std::runtime_error("el id '" + acts[i].id + "' esta repetido en el plan");
+        }
+    }
 
     for (size_t i = 0; i < acts.size(); i++) {
         Actividad &a = acts[i];
