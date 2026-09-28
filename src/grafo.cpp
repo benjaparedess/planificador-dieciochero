@@ -37,9 +37,17 @@ static bool parsearLinea(const std::string &linea, Actividad &out) {
 
     out.id = id;
     out.nombre = nombre;
-    out.tiempo_ms = tiempo.empty()
-        ? (100 + rand() % (5000 - 100 + 1))
-        : std::stol(tiempo);
+    if (tiempo.empty()) {
+        out.tiempo_ms = 100 + rand() % (5000 - 100 + 1);
+    } else {
+        try {
+            size_t usados = 0;
+            out.tiempo_ms = std::stol(tiempo, &usados);
+            if (usados != tiempo.size()) return false; // algo como "12abc"
+        } catch (const std::exception &) {
+            return false; // en caso de que no haya sido un número
+        }
+    }
 
     if (!deps.empty() && deps.front() == '[' && deps.back() == ']') {
         deps = trim(deps.substr(1, deps.size() - 2));
