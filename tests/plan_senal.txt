@@ -1,0 +1,4 @@
+1 : larga_a : 20000 :
+2 : larga_b : 20000 :
+3 : depende_de_a : 100 : 1
+4 : depende_de_b : 100 : 2

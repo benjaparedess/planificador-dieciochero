@@ -16,6 +16,7 @@
 static void prepararPipesSalida(Grafo &g, int i) {
     Actividad &a = g.acts[i];
     for (int suc : a.dependientes) {
+        if (g.acts[suc].estado == Estado::SALTADA) continue; // ya no va a nacer, no le hago pipe
         int fd[2];
         if (pipe(fd) != 0) {
             perror("pipe");
@@ -24,6 +25,12 @@ static void prepararPipesSalida(Grafo &g, int i) {
         a.fd_escritura_dependientes.push_back(fd[1]);
         g.acts[suc].fd_lectura_deps.push_back(fd[0]);
     }
+}
+
+// una actividad falla si su nombre empieza con "falla" (asi probamos con
+// tests/plan_con_falla.txt) o si el tiempo es negativo, que no tiene sentido xd
+static bool debeFallar(const Actividad &a) {
+    return a.tiempo_ms < 0 || a.nombre.rfind("falla", 0) == 0;
 }
 
 // esto corre en el hijo
@@ -38,6 +45,13 @@ static void ejecutarActividad(const Actividad &a) {
         close(fd);
     }
 
+    // si falla salimos con codigo 1 sin escribir nada a los pipes de salida,
+    // el padre se entera por el status del waitpid
+    if (debeFallar(a)) {
+        std::cerr << "  [hijo pid=" << getpid() << "] '" << a.nombre << "' FALLO\n";
+        _exit(1);
+    }
+
     usleep((useconds_t)a.tiempo_ms * 1000);
 
     char msg[MSG_MAX];
@@ -48,6 +62,33 @@ static void ejecutarActividad(const Actividad &a) {
     }
 
     std::cout << "  [hijo pid=" << getpid() << "] termine '" << a.nombre << "'\n";
+}
+
+// cuando una actividad falla, sus dependientes (y los de ellos, y asi) nunca  van a poder correr, los marcamos SALTADA y los sumamos a terminadas para que
+// el while principal no se quede esperandolos. es iterativo con una cola porque
+// con una cadena de 10000 actividades la recursion se puede pasar de la raya
+static void saltarRama(Grafo &g, int origen, int &terminadas) {
+    std::queue<int> por_revisar;
+    for (int suc : g.acts[origen].dependientes) por_revisar.push(suc);
+
+    while (!por_revisar.empty()) {
+        int i = por_revisar.front();
+        por_revisar.pop();
+
+        Actividad &a = g.acts[i];
+        if (a.estado != Estado::PENDIENTE) continue; // ya estaba saltada
+
+        a.estado = Estado::SALTADA;
+        terminadas++;
+        std::cout << "[padre] '" << a.nombre << "' SALTADA (una dependencia fallo)\n";
+
+        // esta actividad nunca va a nacer, asi que cerramos los pipes de
+        // lectura que el padre tenia guardados para ella
+        for (int fd : a.fd_lectura_deps) close(fd);
+        a.fd_lectura_deps.clear();
+
+        for (int suc : a.dependientes) por_revisar.push(suc);
+    }
 }
 
 void ejecutarPlan(Grafo &g, int K) {
@@ -123,19 +164,32 @@ void ejecutarPlan(Grafo &g, int K) {
 
         std::cout << "[padre] '" << term.nombre << "' termino ("
                    << (ok ? "OK" : "FALLO") << ")\n";
+        if (WIFSIGNALED(status)) {
+            std::cout << "[padre] '" << term.nombre << "' murio por la senal "
+                       << WTERMSIG(status) << "\n";
+        }
 
-        // por ahora, avisamos a los dependientes lo que pase, pero cuando
-        // metamos las fallas reales (paso 4) hay que cortar la rama en vez de
-        // seguir bajando el contador como si nada
-        for (int suc : term.dependientes) {
-            Actividad &s = g.acts[suc];
-            s.pending_deps--;
-            if (s.pending_deps == 0 && s.estado == Estado::PENDIENTE) {
-                s.estado = Estado::LISTA;
-                listas.push(suc);
+        if (ok) {
+            for (int suc : term.dependientes) {
+                Actividad &s = g.acts[suc];
+                s.pending_deps--;
+                if (s.pending_deps == 0 && s.estado == Estado::PENDIENTE) {
+                    s.estado = Estado::LISTA;
+                    listas.push(suc);
+                }
             }
+        } else {
+            // si fallo no le bajamos el contador a nadie: cortamos la rama
+            saltarRama(g, idx, terminadas);
         }
     }
 
-    std::cout << "\n[padre] fin de la simulacion (" << terminadas << "/" << n << " actividades)\n";
+    int hechas = 0, fallidas = 0, saltadas = 0;
+    for (const Actividad &a : g.acts) {
+        if (a.estado == Estado::HECHA) hechas++;
+        else if (a.estado == Estado::FALLIDA) fallidas++;
+        else if (a.estado == Estado::SALTADA) saltadas++;
+    }
+    std::cout << "\n[padre] fin de la simulacion: " << hechas << " hechas, "
+               << fallidas << " fallidas, " << saltadas << " saltadas (de " << n << ")\n";
 }
