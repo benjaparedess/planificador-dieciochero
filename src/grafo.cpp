@@ -6,6 +6,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <ctime>
+#include <queue>
 
 static std::string trim(const std::string &s) {
     size_t ini = s.find_first_not_of(" \t\r\n");
@@ -98,7 +99,7 @@ void Grafo::construirDAG() {
     // (con 10000 actividades eso se pone lento altiro)
     std::unordered_map<std::string, int> tabla;
     tabla.reserve(acts.size() * 2);
-    
+
     for (size_t i = 0; i < acts.size(); i++) {
         if (!tabla.emplace(acts[i].id, (int)i).second) {
             throw std::runtime_error("el id '" + acts[i].id + "' esta repetido en el plan");
@@ -121,7 +122,30 @@ void Grafo::construirDAG() {
         a.pending_deps = (int)a.deps.size();
     }
 
-    // como el enunciado dice, asumimos que el plan_ejemplo.txt siempre es un DAG valido
+    // esto, porque con 10000 actividades una recursión se podria pasar de stack
+    std::vector<int> grado(acts.size());
+    std::queue<int> cola;
+    for (size_t i = 0; i < acts.size(); i++) {
+        grado[i] = (int)acts[i].deps.size();
+        if (grado[i] == 0) cola.push((int)i);
+    }
+    size_t visitadas = 0;
+    while (!cola.empty()) {
+        int u = cola.front();
+        cola.pop();
+        visitadas++;
+        for (int v : acts[u].dependientes) {
+            if (--grado[v] == 0) cola.push(v);
+        }
+    }
+    if (visitadas != acts.size()) {
+        for (size_t i = 0; i < acts.size(); i++) {
+            if (grado[i] > 0) {
+                throw std::runtime_error(
+                    "el plan tiene un ciclo de dependencias (por ejemplo en '" + acts[i].id + "')");
+            }
+        }
+    }
 }
 
 void Grafo::cargarDesdeArchivo(const std::string &ruta) {
