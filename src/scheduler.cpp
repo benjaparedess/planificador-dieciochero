@@ -5,11 +5,21 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <csignal>
+#include <cerrno>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
 
 #define MSG_MAX 128
+
+// solo se toca desde el handler y se lee en el loop principal. nada de cout
+// ni kill() adentro del handler, eso no es seguro hacerlo desde una señal
+static volatile sig_atomic_t g_sigint_recibido = 0;
+
+static void manejarSigint(int) {
+    g_sigint_recibido = 1;
+}
 
 // crea un pipe por cada arista que sale de "i", justo antes de su fork,
 // para que el hijo se lleve los extremos de escritura cuando nazca
@@ -28,7 +38,7 @@ static void prepararPipesSalida(Grafo &g, int i) {
 }
 
 // una actividad falla si su nombre empieza con "falla" (asi probamos con
-// tests/plan_con_falla.txt) o si el tiempo es negativo, que no tiene sentido xd
+// tests/plan_con_falla.txt) o si el tiempo es negativo, que no tendría sentido 
 static bool debeFallar(const Actividad &a) {
     return a.tiempo_ms < 0 || a.nombre.rfind("falla", 0) == 0;
 }
@@ -45,7 +55,7 @@ static void ejecutarActividad(const Actividad &a) {
         close(fd);
     }
 
-    // si falla salimos con codigo 1 sin escribir nada a los pipes de salida,
+    // si falla salimos con codigo 1 sin escribir nada a los pipes de salida
     // el padre se entera por el status del waitpid
     if (debeFallar(a)) {
         std::cerr << "  [hijo pid=" << getpid() << "] '" << a.nombre << "' FALLO\n";
@@ -64,9 +74,9 @@ static void ejecutarActividad(const Actividad &a) {
     std::cout << "  [hijo pid=" << getpid() << "] termine '" << a.nombre << "'\n";
 }
 
-// cuando una actividad falla, sus dependientes (y los de ellos, y asi) nunca  van a poder correr, los marcamos SALTADA y los sumamos a terminadas para que
-// el while principal no se quede esperandolos. es iterativo con una cola porque
-// con una cadena de 10000 actividades la recursion se puede pasar de la raya
+// cuando una actividad falla, sus dependientes (y los de ellos, y asi) nunca van a poder correr, los marcamos SALTADA y los sumamos a terminadas para que
+// el while principal no se quede esperandolos.
+// Es iterativo con una cola, porque con una cadena de 10000 actividades la recursión se puede pasar del límite
 static void saltarRama(Grafo &g, int origen, int &terminadas) {
     std::queue<int> por_revisar;
     for (int suc : g.acts[origen].dependientes) por_revisar.push(suc);
@@ -82,13 +92,21 @@ static void saltarRama(Grafo &g, int origen, int &terminadas) {
         terminadas++;
         std::cout << "[padre] '" << a.nombre << "' SALTADA (una dependencia fallo)\n";
 
-        // esta actividad nunca va a nacer, asi que cerramos los pipes de
-        // lectura que el padre tenia guardados para ella
+        // esta actividad nunca va a nacer, asi que cerramos los pipes de lectura que el padre tenia guardados para ella
         for (int fd : a.fd_lectura_deps) close(fd);
         a.fd_lectura_deps.clear();
 
         for (int suc : a.dependientes) por_revisar.push(suc);
     }
+}
+
+// se llama cuando llega SIGINT, mata a todos los hijos que seguian activos y los espera para no dejar zombies
+static void abortarTodo(std::unordered_map<pid_t, int> &pid_a_indice) {
+    std::cerr << "\n[padre] SIGINT recibido, abortando actividades en curso...\n";
+    for (auto &kv : pid_a_indice) {
+        kill(kv.first, SIGKILL);
+    }
+    while (waitpid(-1, nullptr, 0) > 0) {} // hasta que no quede ningún hijo
 }
 
 void ejecutarPlan(Grafo &g, int K) {
@@ -98,6 +116,12 @@ void ejecutarPlan(Grafo &g, int K) {
         rl.rlim_cur = rl.rlim_max;
         setrlimit(RLIMIT_NOFILE, &rl);
     }
+
+    struct sigaction sa{};
+    sa.sa_handler = manejarSigint;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0; // sin SA_RESTART, para que waitpid salga con EINTR
+    sigaction(SIGINT, &sa, nullptr);
 
     int n = (int)g.acts.size();
     int terminadas = 0;
@@ -115,6 +139,12 @@ void ejecutarPlan(Grafo &g, int K) {
     pid_a_indice.reserve((size_t)n * 2);
 
     while (terminadas < n) {
+        if (g_sigint_recibido) {
+            abortarTodo(pid_a_indice);
+            std::cout << "\n[padre] simulacion abortada por Ctrl+C\n";
+            exit(130); // 128 + SIGINT, convención estandar de bash
+        }
+
         while (!listas.empty() && activos < K) {
             int i = listas.front();
             listas.pop();
@@ -130,8 +160,8 @@ void ejecutarPlan(Grafo &g, int K) {
                 ejecutarActividad(a);
                 _exit(0);
             } else {
-                // el hijo ya tiene sus copias de estos fds, en el padre no
-                // los necesitamos más
+                // el hijo ya tiene sus copias de estos fds, en el padre  ya no
+                // son necesarios
                 for (int fd : a.fd_lectura_deps) close(fd);
                 for (int fd : a.fd_escritura_dependientes) close(fd);
 
@@ -148,7 +178,10 @@ void ejecutarPlan(Grafo &g, int K) {
 
         int status;
         pid_t pid_term = waitpid(-1, &status, 0); // esto bloquea, sin tener el busy-wait
-        if (pid_term < 0) break;
+        if (pid_term < 0) {
+            if (errno == EINTR) continue; // nos interrumpió una señal, volvemos arriba a revisar g_sigint_recibido
+            break;
+        }
 
         auto it = pid_a_indice.find(pid_term);
         if (it == pid_a_indice.end()) continue;
@@ -179,7 +212,7 @@ void ejecutarPlan(Grafo &g, int K) {
                 }
             }
         } else {
-            // si fallo no le bajamos el contador a nadie: cortamos la rama
+            // si falló no le bajamos el contador a nadie: cortamos la rama
             saltarRama(g, idx, terminadas);
         }
     }
